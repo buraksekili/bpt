@@ -59,9 +59,10 @@ quickly. So, the references to those pages in this case can be called as 'correl
 
 */
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-type Timestamp = u64;
+// Timestamp corresponds to nanoseconds
+type Timestamp = u128;
 type PageId = u32;
 
 /// HistoryBlock maintains access history (HIST and LAST) for specific page data.
@@ -89,8 +90,6 @@ struct LRUKBuffer {
     // if references are correlated.
     // References within this period are considered part of the same access pattern
     correlated_reference_period: Timestamp,
-    // retained_information_period is the maximum age of history information to retain
-    retained_information_period: Timestamp,
     // Maximum number of pages in buffer
     buffer_size: usize,
     // Main page table: maps page IDs to their history blocks
@@ -143,11 +142,15 @@ impl HistoryBlock {
 }
 
 impl LRUKBuffer {
-    fn new(k: usize, buffer_size: usize, correlated_ref_period: Timestamp, retained_info_period: Timestamp) -> Self {
+    fn new(k: usize, buffer_size: usize, correlated_ref_period_secs: Timestamp) -> Self {
+        let seconds = seconds_to_nanos(correlated_ref_period_secs as u64);
+        if seconds.is_none() {
+            panic!("invalid second provided to LRU-K Buffer")
+        }
+
         LRUKBuffer {
             k,
-            correlated_reference_period: correlated_ref_period,
-            retained_information_period: retained_info_period,
+            correlated_reference_period: seconds.unwrap(),
             buffer_size,
             buffer: HashMap::new(),
             current_size: 0,
@@ -155,14 +158,12 @@ impl LRUKBuffer {
     }
 
     fn current_time() -> Timestamp {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs()
+            .as_nanos()
     }
 
-    /// Main procedure called when a page is referenced
-    /// Implements the core LRU-K algorithm logic
     fn reference_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>) -> Result<(), String> {
         let current_time = Self::current_time();
 
@@ -179,6 +180,7 @@ impl LRUKBuffer {
                 // uncorrelated reference history.
                 block.update_correlated(current_time);
             }
+
             Ok(())
         } else {
             // 2) Page is not in the buffer
@@ -192,6 +194,7 @@ impl LRUKBuffer {
             let new_block = HistoryBlock::new(self.k, current_time, page_data);
             self.buffer.insert(page_id, new_block);
             self.current_size += 1;
+
             Ok(())
         }
     }
@@ -234,27 +237,114 @@ impl LRUKBuffer {
     }
 }
 
-// Test cases to demonstrate correlated/uncorrelated references
+fn seconds_to_nanos(seconds: u64) -> Option<u128> {
+    let duration = Duration::from_secs(seconds);
+    Some(duration.as_nanos())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    fn create_page_data(value: u8) -> Vec<u8> {
+        vec![value; 4096]  // 4KB page
+    }
 
     #[test]
     fn test_correlated_references() {
-        let mut buffer = LRUKBuffer::new(2, 10, 5, 3600);
-        let page_data = vec![0u8; 4096];
+        let mut buffer = LRUKBuffer::new(
+            2, 3, 20,
+        );
 
-        buffer.reference_page(1, Some(page_data.clone())).unwrap();
+        // First reference to page 1
+        let page_data = create_page_data(1);
+        buffer.reference_page(1, Some(page_data)).unwrap();
 
-        if let Some(block) = buffer.buffer.get(&1) {
-            assert_eq!(block.hist[0], block.last);
-        }
+        let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
+        let initial_last = buffer.buffer.get(&1).unwrap().last;
+        assert_eq!(initial_hist, initial_last, "Initial HIST and LAST should be equal");
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
         buffer.reference_page(1, None).unwrap();
 
-        if let Some(block) = buffer.buffer.get(&1) {
-            assert!(block.last > block.hist[0]);
+        let latest_history = buffer.buffer.get(&1).unwrap();
+        assert_eq!(latest_history.hist[0], initial_hist, "HIST should not change for correlated reference");
+        assert!(latest_history.last > initial_last, "LAST should update for correlated reference");
+    }
+
+    #[test]
+    fn test_uncorrelated_references() {
+        let mut buffer = LRUKBuffer::new(2, 3, 1);
+
+        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
+
+        sleep(Duration::from_secs(2));
+
+        buffer.reference_page(1, None).unwrap();
+
+        let block = buffer.buffer.get(&1).unwrap();
+        assert!(block.hist[0] > initial_hist, "HIST should update for uncorrelated reference");
+        assert_eq!(block.hist[0], block.last, "HIST[0] and LAST should be equal for new uncorrelated reference");
+    }
+
+    #[test]
+    fn test_buffer_eviction() {
+        let mut buffer = LRUKBuffer::new(2, 2, 5);
+
+        // Fill buffer
+        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
+
+        assert_eq!(buffer.current_size, 2, "Buffer should be full");
+
+        // Wait to ensure pages are eligible for eviction
+        sleep(Duration::from_secs(6));
+
+        // Add new page, forcing eviction
+        buffer.reference_page(3, Some(create_page_data(3))).unwrap();
+
+        assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
+        assert!(buffer.buffer.contains_key(&3), "New page should be in buffer");
+        assert!(!buffer.buffer.contains_key(&1) || !buffer.buffer.contains_key(&2),
+                "One of the original pages should be evicted");
+    }
+
+    #[test]
+    fn test_dirty_page_eviction() {
+        let mut buffer = LRUKBuffer::new(2, 2, 5);
+
+        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        if let Some(block) = buffer.buffer.get_mut(&1) {
+            block.dirty = true;
         }
+
+        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
+
+        sleep(Duration::from_secs(6));
+
+        buffer.reference_page(3, Some(create_page_data(3))).unwrap();
+
+        assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
+    }
+
+    #[test]
+    fn test_mixed_reference_patterns() {
+        let mut buffer = LRUKBuffer::new(2, 3, 1);
+
+        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
+        buffer.reference_page(1, None).unwrap();
+        sleep(Duration::from_secs(2));
+
+        buffer.reference_page(1, None).unwrap();
+
+        let block = buffer.buffer.get(&1).unwrap();
+        assert_eq!(block.hist.len(), 2);
+        assert!(block.hist[1] > 0, "Should have historical reference");
+        assert!(block.hist[0] > block.hist[1], "First reference must be the recent one");
+        assert_eq!(block.last, block.hist[0]);
+        assert_eq!(block.dirty, false);
     }
 }
