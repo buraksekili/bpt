@@ -181,7 +181,7 @@ impl LRUKBuffer {
             }
             Ok(())
         } else {
-            // 1) Page is not in the buffer
+            // 2) Page is not in the buffer
             // Check if we need to evict a page
             if self.current_size >= self.buffer_size {
                 self.evict_victim(current_time)?;
@@ -230,28 +230,6 @@ impl LRUKBuffer {
         } else {
             Err("No eligible victim found".to_string())
         }
-    }
-
-    /// Example usage with multiple references
-    fn example_usage() {
-        let mut buffer = LRUKBuffer::new(
-            2,                  // K=2
-            1000,              // Buffer size
-            5,                 // Correlated reference period (5 seconds)
-            3600,               // Retained information period (1 hour)
-        );
-
-        // Example sequence of references
-        let page_data = vec![0u8; 4096];  // 4KB page
-
-        // Time 1: First reference to page 1
-        buffer.reference_page(1, Some(page_data.clone())).unwrap();
-
-        // Time 2: Correlated reference to page 1 (within 5 seconds)
-        buffer.reference_page(1, None).unwrap();
-
-        // Time 8: Uncorrelated reference to page 1 (after 5 seconds)
-        buffer.reference_page(1, None).unwrap();
     }
 }
 
