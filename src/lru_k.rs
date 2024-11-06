@@ -199,18 +199,19 @@ impl LRUKBuffer {
     /// Selects and evicts a victim page based on LRU-K policy
     fn evict_victim(&mut self, current_time: Timestamp) -> Result<(), String> {
         let mut victim_id = None;
+        // TODO: do we need Timestamp::MAX or `current_time`??
+        // based on paper, it needs to be current_time; not sure
         let mut min_hist_k = Timestamp::MAX;
 
         // Find page with minimum HIST(q,K) among eligible pages
         // Pages in correlated reference period are not eligible
         for (page_id, block) in self.buffer.iter() {
             // Check if page is outside correlated reference period
-            if current_time - block.last > self.correlated_reference_period {
-                // Compare K-th reference time (older is smaller)
-                if block.hist[self.k - 1] < min_hist_k {
-                    min_hist_k = block.hist[self.k - 1];
-                    victim_id = Some(*page_id);
-                }
+            // Compare K-th reference time (older is smaller)
+            if current_time - block.last > self.correlated_reference_period &&
+                block.hist[self.k - 1] < min_hist_k {
+                min_hist_k = block.hist[self.k - 1];
+                victim_id = Some(*page_id);
             }
         }
 
@@ -218,7 +219,7 @@ impl LRUKBuffer {
             // Write back dirty page if needed
             if let Some(block) = self.buffer.get(&victim) {
                 if block.dirty {
-                    // In real implementation: write to disk
+                    // TODO: write to disk
                     println!("Writing back dirty page {}", victim);
                 }
             }
