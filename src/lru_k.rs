@@ -84,6 +84,7 @@ struct HistoryBlock {
 }
 
 struct LRUKBuffer {
+    _c: usize,
     // k is the number of history references to track (the 'K' in LRU-K)
     k: usize,
     // correlated_reference_period corresponds to the time window to determine
@@ -149,6 +150,7 @@ impl LRUKBuffer {
         }
 
         LRUKBuffer {
+            _c: 0,
             k,
             correlated_reference_period: seconds.unwrap(),
             buffer_size,
@@ -179,6 +181,17 @@ impl LRUKBuffer {
                 // Update only LAST, no need to update HIST as it only contains
                 // uncorrelated reference history.
                 block.update_correlated(current_time);
+            }
+
+            // page_data = "hello"
+            // v = "sa"
+            // 1 == 3? degil
+            let eq = match page_data {
+                Some(v) => v == block.data,
+                None => false
+            };
+            if !eq {
+                block.dirty = true;
             }
 
             Ok(())
@@ -223,7 +236,8 @@ impl LRUKBuffer {
             if let Some(block) = self.buffer.get(&victim) {
                 if block.dirty {
                     // TODO: write to disk
-                    println!("Writing back dirty page {}", victim);
+                    // println!("Writing back dirty page {}", victim);
+                    self._c += 1;
                 }
             }
 
@@ -250,6 +264,20 @@ mod tests {
 
     fn create_page_data(value: u8) -> Vec<u8> {
         vec![value; 4096]  // 4KB page
+    }
+
+
+    #[test]
+    fn test_dirty_page() {
+        let mut buffer = LRUKBuffer::new(
+            2, 3, 20,
+        );
+
+        let page_data = create_page_data(1);
+        buffer.reference_page(1, Some(page_data)).unwrap();
+        buffer.reference_page(1, Some(create_page_data(2))).unwrap();
+        let latest_history = buffer.buffer.get(&1).unwrap();
+        assert_eq!(latest_history.dirty, true, "HIST should not change for correlated reference");
     }
 
     #[test]
@@ -345,6 +373,6 @@ mod tests {
         assert!(block.hist[1] > 0, "Should have historical reference");
         assert!(block.hist[0] > block.hist[1], "First reference must be the recent one");
         assert_eq!(block.last, block.hist[0]);
-        assert_eq!(block.dirty, false);
+        assert_eq!(block.dirty, true);
     }
 }
