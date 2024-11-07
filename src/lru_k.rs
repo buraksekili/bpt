@@ -166,7 +166,7 @@ impl LRUKBuffer {
             .as_nanos()
     }
 
-    fn reference_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>) -> Result<(), String> {
+    fn ref_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>) -> Result<(), String> {
         let current_time = Self::current_time();
 
         if let Some(block) = self.buffer.get_mut(&page_id) {
@@ -183,9 +183,6 @@ impl LRUKBuffer {
                 block.update_correlated(current_time);
             }
 
-            // page_data = "hello"
-            // v = "sa"
-            // 1 == 3? degil
             let eq = match page_data {
                 Some(v) => v == block.data,
                 None => false
@@ -222,7 +219,7 @@ impl LRUKBuffer {
         // Find page with minimum HIST(q,K) among eligible pages
         // Pages in correlated reference period are not eligible
         for (page_id, block) in self.buffer.iter() {
-            // Check if page is outside correlated reference period
+            // Check if page is uncorrelated reference and
             // Compare K-th reference time (older is smaller)
             if current_time - block.last > self.correlated_reference_period &&
                 block.hist[self.k - 1] < min_hist_k {
@@ -233,11 +230,12 @@ impl LRUKBuffer {
 
         if let Some(victim) = victim_id {
             // Write back dirty page if needed
-            if let Some(block) = self.buffer.get(&victim) {
+            if let Some(block) = self.buffer.get_mut(&victim) {
                 if block.dirty {
                     // TODO: write to disk
-                    // println!("Writing back dirty page {}", victim);
+                    println!("Writing back dirty page {}", victim);
                     self._c += 1;
+                    block.dirty = false;
                 }
             }
 
@@ -246,6 +244,7 @@ impl LRUKBuffer {
             self.current_size -= 1;
             Ok(())
         } else {
+            // TODO: Run LRU here to fix ambiguity.
             Err("No eligible victim found".to_string())
         }
     }
@@ -266,6 +265,20 @@ mod tests {
         vec![value; 4096]  // 4KB page
     }
 
+    #[test]
+    fn check_evicted_page() {
+        let buffer_size = 3;
+        let mut buffer = LRUKBuffer::new(
+            2, buffer_size, 200,
+        );
+
+        // fill the buffer
+        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(1, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
+        buffer.ref_page(4, Some(create_page_data(3))).unwrap();
+    }
 
     #[test]
     fn test_dirty_page() {
@@ -274,8 +287,8 @@ mod tests {
         );
 
         let page_data = create_page_data(1);
-        buffer.reference_page(1, Some(page_data)).unwrap();
-        buffer.reference_page(1, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, Some(page_data)).unwrap();
+        buffer.ref_page(1, Some(create_page_data(2))).unwrap();
         let latest_history = buffer.buffer.get(&1).unwrap();
         assert_eq!(latest_history.dirty, true, "HIST should not change for correlated reference");
     }
@@ -288,13 +301,13 @@ mod tests {
 
         // First reference to page 1
         let page_data = create_page_data(1);
-        buffer.reference_page(1, Some(page_data)).unwrap();
+        buffer.ref_page(1, Some(page_data)).unwrap();
 
         let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
         let initial_last = buffer.buffer.get(&1).unwrap().last;
         assert_eq!(initial_hist, initial_last, "Initial HIST and LAST should be equal");
 
-        buffer.reference_page(1, None).unwrap();
+        buffer.ref_page(1, None).unwrap();
 
         let latest_history = buffer.buffer.get(&1).unwrap();
         assert_eq!(latest_history.hist[0], initial_hist, "HIST should not change for correlated reference");
@@ -305,12 +318,12 @@ mod tests {
     fn test_uncorrelated_references() {
         let mut buffer = LRUKBuffer::new(2, 3, 1);
 
-        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
         let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
 
         sleep(Duration::from_secs(2));
 
-        buffer.reference_page(1, None).unwrap();
+        buffer.ref_page(1, None).unwrap();
 
         let block = buffer.buffer.get(&1).unwrap();
         assert!(block.hist[0] > initial_hist, "HIST should update for uncorrelated reference");
@@ -322,8 +335,8 @@ mod tests {
         let mut buffer = LRUKBuffer::new(2, 2, 5);
 
         // Fill buffer
-        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
-        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer should be full");
 
@@ -331,7 +344,7 @@ mod tests {
         sleep(Duration::from_secs(6));
 
         // Add new page, forcing eviction
-        buffer.reference_page(3, Some(create_page_data(3))).unwrap();
+        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
         assert!(buffer.buffer.contains_key(&3), "New page should be in buffer");
@@ -343,16 +356,16 @@ mod tests {
     fn test_dirty_page_eviction() {
         let mut buffer = LRUKBuffer::new(2, 2, 5);
 
-        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
         if let Some(block) = buffer.buffer.get_mut(&1) {
             block.dirty = true;
         }
 
-        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
 
         sleep(Duration::from_secs(6));
 
-        buffer.reference_page(3, Some(create_page_data(3))).unwrap();
+        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
     }
@@ -361,12 +374,12 @@ mod tests {
     fn test_mixed_reference_patterns() {
         let mut buffer = LRUKBuffer::new(2, 3, 1);
 
-        buffer.reference_page(1, Some(create_page_data(1))).unwrap();
-        buffer.reference_page(2, Some(create_page_data(2))).unwrap();
-        buffer.reference_page(1, None).unwrap();
+        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, None).unwrap();
         sleep(Duration::from_secs(2));
 
-        buffer.reference_page(1, None).unwrap();
+        buffer.ref_page(1, None).unwrap();
 
         let block = buffer.buffer.get(&1).unwrap();
         assert_eq!(block.hist.len(), 2);
