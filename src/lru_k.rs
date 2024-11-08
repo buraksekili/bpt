@@ -58,12 +58,15 @@ quickly. So, the references to those pages in this case can be called as 'correl
 - "Uncorrelated references" are the ones to the same page that are separated by a significant time gap.
 
 */
+use crate::error;
+use crate::error::BufferError;
 use std::collections::HashMap;
 use std::time::Duration;
 
 // Timestamp corresponds to nanoseconds
 type Timestamp = u128;
 type PageId = u32;
+
 
 /// HistoryBlock maintains access history (HIST and LAST) for specific page data.
 /// - Maintains K most recent uncorrelated references in hist
@@ -99,6 +102,7 @@ struct LRUKBuffer {
     current_size: usize,
 }
 
+
 impl HistoryBlock {
     /// Creates a new history block for a page
     /// Initializes first reference as both HIST[0] and LAST
@@ -112,6 +116,20 @@ impl HistoryBlock {
             dirty: false,
             data: page_data,
         }
+    }
+
+    fn get_backward_k_distance(&self, k: usize, current_time: Timestamp) -> error::Result<Timestamp> {
+        if self.hist.len() <= k - 1 {
+            return Err(BufferError {
+                detail: String::from("HIST is not populated"),
+            });
+        }
+
+        if self.hist.iter().any(|&ts| ts == 0) {
+            return Ok(Timestamp::MIN);
+        }
+
+        Ok(current_time - self.hist[k - 1])
     }
 
     /// Updates history for a correlated reference
@@ -142,6 +160,19 @@ impl HistoryBlock {
     }
 }
 
+fn current_time(add_seconds: Option<u64>) -> Timestamp {
+    let current = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+
+    add_seconds
+        .map_or(current, |secs| {
+            current.checked_add(std::time::Duration::from_secs(secs))
+                .unwrap_or(current)
+        })
+        .as_nanos()
+}
+
 impl LRUKBuffer {
     fn new(k: usize, buffer_size: usize, correlated_ref_period_secs: Timestamp) -> Self {
         let seconds = seconds_to_nanos(correlated_ref_period_secs as u64);
@@ -159,16 +190,11 @@ impl LRUKBuffer {
         }
     }
 
-    fn current_time() -> Timestamp {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+    pub fn ref_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>) -> Result<(), String> {
+        self._ref_page(page_id, page_data, current_time(None))
     }
 
-    fn ref_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>) -> Result<(), String> {
-        let current_time = Self::current_time();
-
+    fn _ref_page(&mut self, page_id: PageId, page_data: Option<Vec<u8>>, current_time: Timestamp) -> Result<(), String> {
         if let Some(block) = self.buffer.get_mut(&page_id) {
             // 1) Page is already in buffer
             // Determine if this is a correlated reference by checking time since last reference.
@@ -196,7 +222,9 @@ impl LRUKBuffer {
             // 2) Page is not in the buffer
             // Check if we need to evict a page
             if self.current_size >= self.buffer_size {
-                self.evict_victim(current_time)?;
+                if self.evict(current_time).is_none() {
+                    return Err(String::from("failed to evict a page"));
+                }
             }
 
             // Initialize new page's history
@@ -209,22 +237,24 @@ impl LRUKBuffer {
         }
     }
 
-    /// Selects and evicts a victim page based on LRU-K policy
-    fn evict_victim(&mut self, current_time: Timestamp) -> Result<(), String> {
+    fn evict(&mut self, current_time: Timestamp) -> Option<HistoryBlock> {
         let mut victim_id = None;
-        // TODO: do we need Timestamp::MAX or `current_time`??
-        // based on paper, it needs to be current_time; not sure
-        let mut min_hist_k = Timestamp::MAX;
+        let mut max_backward_k_dist = Timestamp::MIN;
 
-        // Find page with minimum HIST(q,K) among eligible pages
-        // Pages in correlated reference period are not eligible
         for (page_id, block) in self.buffer.iter() {
-            // Check if page is uncorrelated reference and
-            // Compare K-th reference time (older is smaller)
-            if current_time - block.last > self.correlated_reference_period &&
-                block.hist[self.k - 1] < min_hist_k {
-                min_hist_k = block.hist[self.k - 1];
-                victim_id = Some(*page_id);
+            if current_time < block.last {
+                continue;
+            }
+
+            let dist = current_time - block.last;
+
+            if dist > self.correlated_reference_period {
+                if let Ok(backward_k_dist) = block.get_backward_k_distance(self.k, current_time) {
+                    if backward_k_dist >= max_backward_k_dist {
+                        max_backward_k_dist = backward_k_dist;
+                        victim_id = Some(*page_id);
+                    }
+                }
             }
         }
 
@@ -240,13 +270,13 @@ impl LRUKBuffer {
             }
 
             // Remove victim from buffer
-            self.buffer.remove(&victim);
+            let block = self.buffer.remove(&victim);
             self.current_size -= 1;
-            Ok(())
-        } else {
-            // TODO: Run LRU here to fix ambiguity.
-            Err("No eligible victim found".to_string())
+
+            return block;
         }
+
+        None
     }
 }
 
@@ -266,18 +296,67 @@ mod tests {
     }
 
     #[test]
-    fn check_evicted_page() {
-        let buffer_size = 3;
-        let mut buffer = LRUKBuffer::new(
-            2, buffer_size, 200,
-        );
+    fn test_backward_k_distance_calculation() {
+        let k = 2;
+        let current_time = 6;
 
-        // fill the buffer
-        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
-        buffer.ref_page(1, Some(create_page_data(2))).unwrap();
-        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
-        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
-        buffer.ref_page(4, Some(create_page_data(3))).unwrap();
+        let page1 = HistoryBlock {
+            hist: vec![4, 1],
+            last: 4,
+            dirty: false,
+            data: vec![1],
+        };
+
+        let page2 = HistoryBlock {
+            hist: vec![5, 2],
+            last: 5,
+            dirty: false,
+            data: vec![2],
+        };
+
+        let page3 = HistoryBlock {
+            hist: vec![3, 0],
+            last: 3,
+            dirty: false,
+            data: vec![3],
+        };
+
+        let k_dist = page1.get_backward_k_distance(k, current_time);
+        assert!(k_dist.is_ok());
+        assert_eq!(k_dist.unwrap(), 5);
+
+        let k_dist = page2.get_backward_k_distance(k, current_time);
+        assert!(k_dist.is_ok());
+        assert_eq!(k_dist.unwrap(), 4);
+
+        let k_dist = page3.get_backward_k_distance(k, current_time);
+        assert!(k_dist.is_ok());
+        assert_eq!(k_dist.unwrap(), 0);
+    }
+
+    #[test]
+    fn simple_eviction() {
+        let mut buffer = LRUKBuffer::new(2, 3, 1);
+
+        buffer._ref_page(1, Some(vec![1]), current_time(None)).unwrap();
+        buffer._ref_page(2, Some(vec![2]), current_time(None)).unwrap();
+        buffer._ref_page(1, Some(vec![1]), current_time(Some(3))).unwrap();
+
+        let res = buffer.evict(current_time(Some(5))).unwrap();
+        assert_eq!(res.data, vec![1]);
+    }
+
+    #[test]
+    fn multi_candidate_eviction() {
+        let mut buffer = LRUKBuffer::new(2, 3, 1);
+
+        buffer._ref_page(1, Some(vec![1]), current_time(None)).unwrap();
+        buffer._ref_page(2, Some(vec![2]), current_time(None)).unwrap();
+        buffer._ref_page(1, Some(vec![1]), current_time(Some(2))).unwrap();
+        buffer._ref_page(2, Some(vec![2]), current_time(Some(4))).unwrap();
+
+        let res = buffer.evict(current_time(Some(10))).unwrap();
+        assert_eq!(res.data, vec![1]);
     }
 
     #[test]
@@ -332,19 +411,18 @@ mod tests {
 
     #[test]
     fn test_buffer_eviction() {
-        let mut buffer = LRUKBuffer::new(2, 2, 5);
+        let mut buffer = LRUKBuffer::new(2, 2, 1);
 
-        // Fill buffer
         buffer.ref_page(1, Some(create_page_data(1))).unwrap();
         buffer.ref_page(2, Some(create_page_data(2))).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer should be full");
 
         // Wait to ensure pages are eligible for eviction
-        sleep(Duration::from_secs(6));
+        sleep(Duration::from_secs(2));
 
         // Add new page, forcing eviction
-        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
+        buffer.ref_page(3, Some(vec![3])).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
         assert!(buffer.buffer.contains_key(&3), "New page should be in buffer");
