@@ -291,10 +291,6 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
 
-    fn create_page_data(value: u8) -> Vec<u8> {
-        vec![value; 4096]  // 4KB page
-    }
-
     #[test]
     fn test_backward_k_distance_calculation() {
         let k = 2;
@@ -365,9 +361,9 @@ mod tests {
             2, 3, 20,
         );
 
-        let page_data = create_page_data(1);
+        let page_data = vec![1];
         buffer.ref_page(1, Some(page_data)).unwrap();
-        buffer.ref_page(1, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, Some(vec![2])).unwrap();
         let latest_history = buffer.buffer.get(&1).unwrap();
         assert_eq!(latest_history.dirty, true, "HIST should not change for correlated reference");
     }
@@ -379,7 +375,7 @@ mod tests {
         );
 
         // First reference to page 1
-        let page_data = create_page_data(1);
+        let page_data = vec![1];
         buffer.ref_page(1, Some(page_data)).unwrap();
 
         let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
@@ -397,7 +393,7 @@ mod tests {
     fn test_uncorrelated_references() {
         let mut buffer = LRUKBuffer::new(2, 3, 1);
 
-        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(1, Some(vec![1])).unwrap();
         let initial_hist = buffer.buffer.get(&1).unwrap().hist[0];
 
         sleep(Duration::from_secs(2));
@@ -413,8 +409,8 @@ mod tests {
     fn test_buffer_eviction() {
         let mut buffer = LRUKBuffer::new(2, 2, 1);
 
-        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
-        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, Some(vec![1])).unwrap();
+        buffer.ref_page(2, Some(vec![2])).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer should be full");
 
@@ -434,16 +430,16 @@ mod tests {
     fn test_dirty_page_eviction() {
         let mut buffer = LRUKBuffer::new(2, 2, 5);
 
-        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
+        buffer.ref_page(1, Some(vec![1])).unwrap();
         if let Some(block) = buffer.buffer.get_mut(&1) {
             block.dirty = true;
         }
 
-        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(2, Some(vec![2])).unwrap();
 
         sleep(Duration::from_secs(6));
 
-        buffer.ref_page(3, Some(create_page_data(3))).unwrap();
+        buffer.ref_page(3, Some(vec![3])).unwrap();
 
         assert_eq!(buffer.current_size, 2, "Buffer size should remain at capacity");
     }
@@ -452,8 +448,8 @@ mod tests {
     fn test_mixed_reference_patterns() {
         let mut buffer = LRUKBuffer::new(2, 3, 1);
 
-        buffer.ref_page(1, Some(create_page_data(1))).unwrap();
-        buffer.ref_page(2, Some(create_page_data(2))).unwrap();
+        buffer.ref_page(1, Some(vec![1])).unwrap();
+        buffer.ref_page(2, Some(vec![2])).unwrap();
         buffer.ref_page(1, None).unwrap();
         sleep(Duration::from_secs(2));
 
