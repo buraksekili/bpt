@@ -133,7 +133,7 @@ pub struct LRUKReplacer {
 
 
 impl LRUKReplacer {
-    fn new(k: usize, buffer_size: usize) -> Self {
+    pub(crate) fn new(k: usize, buffer_size: usize) -> Self {
         LRUKReplacer {
             k,
             buffer_size,

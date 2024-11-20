@@ -33,6 +33,16 @@ impl DiskManager {
         })
     }
 
+    pub fn deallocate_page(&self, page_id: PageId) -> StorageResult<()> {
+        let mut f = self.db_file.lock();
+        let offset = (page_id as u64) * (PAGE_SIZE as u64);
+        f.seek(SeekFrom::Start(offset))?;
+        f.write_all(&[0; PAGE_SIZE])?;
+        f.flush()?;
+        
+        Ok(())
+    }
+
     pub fn allocate_new_page(&self) -> StorageResult<PageId> {
         let mut file = self.db_file.lock();
         let new_page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst);

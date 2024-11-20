@@ -1,2 +1,2 @@
 pub mod disk;
-mod types;
+pub mod types;

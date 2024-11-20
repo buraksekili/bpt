@@ -27,13 +27,14 @@ pub enum DiskResponse {
 
 pub enum DiskRequest {
     Write {
-        page_id: usize,
+        page_id: PageId,
         data: BytesMut,
     },
     Read {
-        page_id: usize,
+        page_id: PageId,
     },
     Allocate,
+    Deallocate(PageId),
     Shutdown,
 }
 
@@ -117,6 +118,12 @@ impl DiskScheduler {
                                 Err(e) => {
                                     callback.send(DiskResponse::Error(e)).unwrap();
                                 }
+                            }
+                        }
+                        DiskRequest::Deallocate(page_id) => {
+                            match disk_manager.deallocate_page(page_id) {
+                                Err(err) => callback.send(DiskResponse::Error(err)).unwrap(),
+                                _ => {},
                             }
                         }
                         DiskRequest::Shutdown => {
