@@ -201,6 +201,8 @@ mod tests {
             for i in 0..10 {
                 let pin_count = m.get_pin_count(i)?;
                 assert_eq!(pin_count, 1);
+                let result = m.delete_page(i);
+                assert!(matches!(result, Err(BufferManagerError::PagePinned)));
             }
         }
 
