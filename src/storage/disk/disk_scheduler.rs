@@ -1,8 +1,7 @@
 use crate::buffer::types::PageId;
 use crate::storage::disk::disk_manager::DiskManager;
 use crate::storage::types::{StorageError, StorageResult};
-use bytes::BytesMut;
-use std::ops::Deref;
+use bytes::Bytes;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -16,7 +15,7 @@ pub enum DiskError {
 
 pub enum DiskResponse {
     Read {
-        data: BytesMut,
+        data: Bytes,
     },
     Write,
     Allocate {
@@ -28,7 +27,7 @@ pub enum DiskResponse {
 pub enum DiskRequest {
     Write {
         page_id: PageId,
-        data: BytesMut,
+        data: Bytes,
     },
     Read {
         page_id: PageId,
@@ -123,7 +122,7 @@ impl DiskScheduler {
                         DiskRequest::Deallocate(page_id) => {
                             match disk_manager.deallocate_page(page_id) {
                                 Err(err) => callback.send(DiskResponse::Error(err)).unwrap(),
-                                _ => {},
+                                _ => {}
                             }
                         }
                         DiskRequest::Shutdown => {
@@ -173,6 +172,7 @@ mod tests {
     use crate::storage::disk::PAGE_SIZE;
     use crate::util::{create_dummy_page, read_page_content};
     use std::sync::Arc;
+    use bytes::BytesMut;
     use tempfile::TempDir;
 
     // Helper function to create a scheduler with temp directory
@@ -193,8 +193,8 @@ mod tests {
             _ => panic!("unexpected response"),
         };
 
-        const test_content: &str = "test data";
-        let write_data = create_dummy_page(test_content);
+        const TEST_CONTENT: &str = "test data";
+        let write_data = create_dummy_page(TEST_CONTENT);
         let rx = scheduler.schedule(
             DiskRequest::Write {
                 page_id,
@@ -209,7 +209,7 @@ mod tests {
                 assert_eq!(data.len(), PAGE_SIZE);
                 assert_eq!(read_page_content(&write_data), read_page_content(&data));
                 assert_eq!(&data[..data.len()], &write_data[..data.len()]);
-                assert!(data[test_content.len()..].iter().all(|&x| x == 0));
+                assert!(data[TEST_CONTENT.len()..].iter().all(|&x| x == 0));
             }
             _ => panic!("unexpected response"),
         }
@@ -232,6 +232,7 @@ mod tests {
         let data = BytesMut::from(&b"concurrent test data"[..]);
         let mut write_data = BytesMut::zeroed(PAGE_SIZE);
         write_data[..data.len()].copy_from_slice(&data);
+        let write_data = write_data.freeze();
 
         let rx = scheduler.schedule(DiskRequest::Write {
             page_id,
@@ -267,15 +268,13 @@ mod tests {
     fn test_error_handling() -> StorageResult<()> {
         let (_temp_dir, scheduler) = create_test_scheduler();
 
-        // Try to read a non-existent page
         let rx = scheduler.schedule(DiskRequest::Read { page_id: 99999 })?;
         match rx.recv().unwrap() {
             DiskResponse::Error(_) => (),
             _ => panic!("expected error response"),
         }
 
-        // Try to write to a non-existent page
-        let data = BytesMut::zeroed(PAGE_SIZE);
+        let data = BytesMut::zeroed(PAGE_SIZE).freeze();
         let rx = scheduler.schedule(DiskRequest::Write {
             page_id: 99999,
             data,
@@ -314,6 +313,7 @@ mod tests {
             let mut data = BytesMut::zeroed(PAGE_SIZE);
             let content = format!("page content {}", i);
             data[..content.len()].copy_from_slice(content.as_bytes());
+            let data = data.freeze();
 
             let rx = scheduler.schedule(DiskRequest::Write {
                 page_id,

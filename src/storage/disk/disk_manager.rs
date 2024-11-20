@@ -1,7 +1,7 @@
 use crate::buffer::types::PageId;
 use crate::storage::disk::PAGE_SIZE;
 use crate::storage::types::{StorageError, StorageResult};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -39,17 +39,18 @@ impl DiskManager {
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(&[0; PAGE_SIZE])?;
         f.flush()?;
-        
+
         Ok(())
     }
 
     pub fn allocate_new_page(&self) -> StorageResult<PageId> {
         let mut file = self.db_file.lock();
+
         let new_page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst);
         let offset = (new_page_id as u64) * (PAGE_SIZE as u64);
 
         file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&*BytesMut::zeroed(PAGE_SIZE))?;
+        file.write_all(&[0; PAGE_SIZE])?;
         file.flush()?;
 
         Ok(new_page_id)
@@ -72,17 +73,17 @@ impl DiskManager {
         Ok(())
     }
 
-    pub fn read_page(&self, page_id: PageId) -> StorageResult<BytesMut> {
+    pub fn read_page(&self, page_id: PageId) -> StorageResult<Bytes> {
         let mut file = self.db_file.lock();
         let mut buffer = BytesMut::zeroed(PAGE_SIZE);
 
         let offset = (page_id as usize * PAGE_SIZE) as u64;
 
-        // set offset and read page data
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;
 
-        Ok(buffer)
+        // Convert BytesMut to Bytes
+        Ok(buffer.freeze())
     }
 }
 

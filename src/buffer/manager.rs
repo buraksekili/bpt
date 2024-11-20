@@ -2,27 +2,19 @@ use crate::buffer::lruk_replacer::LRUKReplacer;
 use crate::buffer::types::{BufferManagerError, BufferManagerResult, FrameId, PageId};
 use crate::storage::disk::disk_scheduler::{DiskRequest, DiskResponse, DiskScheduler};
 use crate::storage::disk::PAGE_SIZE;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn empty_data(size: Option<usize>) -> BytesMut {
-    if let Some(size) = size {
-        return BytesMut::zeroed(size);
-    }
-
-    BytesMut::zeroed(PAGE_SIZE)
-}
-
 // FrameHeader corresponds to the frame (page) in memory.
 struct FrameHeader {
     frame_id: FrameId,
     pin_count: u32,
     is_dirty: bool,
-    data: BytesMut,
+    data: Bytes,
 }
 
 impl FrameHeader {
@@ -30,12 +22,17 @@ impl FrameHeader {
         Self {
             frame_id,
             is_dirty: false,
-            pin_count: 0,
-            data: empty_data(None),
+            pin_count: 1,
+            data: BytesMut::zeroed(PAGE_SIZE).freeze(),
         }
     }
 }
 
+impl Drop for FrameHeader {
+    fn drop(&mut self) {
+        self.pin_count -= 1;
+    }
+}
 
 // BufferManager manages data between disk and memory.
 // Each data contains PAGE_SIZE bytes in it (4KB by default).
@@ -150,6 +147,35 @@ impl BufferManager {
         Ok(self.frames[frame_id].read().pin_count)
     }
 
+    pub fn flush_page(&mut self, page_id: PageId) -> BufferManagerResult<()> {
+        let frame_id = *self.page_table.get(&page_id)
+            .ok_or(BufferManagerError::PageNotFound)?;
+
+        {
+            let mut frame = self.frames[frame_id].write();
+            self.disk_scheduler.schedule(
+                DiskRequest::Write {
+                    page_id,
+                    data: frame.data.clone(),
+                })?;
+            frame.pin_count -= 1;
+            frame.is_dirty = false;
+        }
+
+        Ok(())
+    }
+
+    pub fn flush_all(&mut self) -> BufferManagerResult<()> {
+        let mut pages = Vec::with_capacity(self.page_table.len());
+        pages.extend(self.page_table.keys().copied());
+
+        for page_id in pages {
+            self.flush_page(page_id)?;
+        }
+
+        Ok(())
+    }
+
     fn allocate_frame(&mut self) -> BufferManagerResult<FrameId> {
         if let Some(page_id) = self.free_frames.pop() {
             return Ok(page_id);
@@ -172,9 +198,16 @@ mod tests {
     use crate::storage::disk::disk_manager::DiskManager;
     use tempfile::TempDir;
 
+    #[test]
+    fn test_frame_header() {
+        const FRAME_ID: usize = 50;
+        let f = FrameHeader::new(FRAME_ID);
+        assert_eq!(f.frame_id, FRAME_ID);
+        assert_eq!(f.pin_count, 1);
+    }
 
     #[test]
-    fn simple() -> BufferManagerResult<()> {
+    fn test_disk_manager_simple() -> BufferManagerResult<()> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
 
         const BUFFER_SIZE: usize = 10;
@@ -196,7 +229,6 @@ mod tests {
                 assert_eq!(m.free_frames.len(), BUFFER_SIZE - (i + 1));
             }
         }
-
         {
             for i in 0..10 {
                 let pin_count = m.get_pin_count(i)?;
