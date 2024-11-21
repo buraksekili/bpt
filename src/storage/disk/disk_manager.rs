@@ -35,7 +35,7 @@ impl DiskManager {
 
     pub fn deallocate_page(&self, page_id: PageId) -> StorageResult<()> {
         let mut f = self.db_file.lock();
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
+        let offset = (page_id.0 as u64) * (PAGE_SIZE as u64);
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(&[0; PAGE_SIZE])?;
         f.flush()?;
@@ -53,12 +53,12 @@ impl DiskManager {
         file.write_all(&[0; PAGE_SIZE])?;
         file.flush()?;
 
-        Ok(new_page_id)
+        Ok(PageId(new_page_id))
     }
 
     pub fn write_page(&self, page_id: PageId, page_data: &[u8]) -> StorageResult<()> {
         let mut file = self.db_file.lock();
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
+        let offset = (page_id.0 as u64) * (PAGE_SIZE as u64);
 
         if page_data.len() != PAGE_SIZE {
             return Err(StorageError::ManagerReadPage(
@@ -77,7 +77,7 @@ impl DiskManager {
         let mut file = self.db_file.lock();
         let mut buffer = BytesMut::zeroed(PAGE_SIZE);
 
-        let offset = (page_id as usize * PAGE_SIZE) as u64;
+        let offset = (page_id.0 * PAGE_SIZE) as u64;
 
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;

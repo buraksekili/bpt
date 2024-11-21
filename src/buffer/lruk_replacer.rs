@@ -62,12 +62,9 @@ quickly. So, the references to those pages in this case can be called as 'correl
 use crate::buffer::types::FrameId;
 use crate::common::time::Timestamp;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 #[derive(Debug)]
 pub struct LRUKNode {
-    pin_count: AtomicUsize,
     // hist is the array of uncorrelated references.
     // So, it contains K most recent references, excluding correlated ones
     // hist[0] is most recent, hist[K-1] is oldest
@@ -75,8 +72,6 @@ pub struct LRUKNode {
     // last is the most recent reference time (including correlated ones).
     // Updated on EVERY reference, whether correlated or not.
     last: Timestamp,
-    // dirty indicates if page needs to be written back to disk
-    dirty: bool,
     evictable: bool,
 }
 
@@ -85,10 +80,8 @@ impl LRUKNode {
         let mut hist = VecDeque::with_capacity(k);
         hist.push_back(ts);
         LRUKNode {
-            pin_count: AtomicUsize::new(0),
             hist,
             last: ts,
-            dirty: false,
             evictable: false,
         }
     }
@@ -98,17 +91,6 @@ impl LRUKNode {
         self.evictable
     }
 
-    fn increment_pin_count(&self) {
-        self.pin_count.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn decrement_pin_count(&self) -> usize {
-        self.pin_count.fetch_sub(1, Ordering::SeqCst)
-    }
-
-    fn get_pin_count(&self) -> usize {
-        self.pin_count.load(Ordering::SeqCst)
-    }
 
     fn get_backward_k_distance(&self, k: usize, current_time: Timestamp) -> Timestamp {
         if self.hist.len() <= k - 1 {
@@ -122,8 +104,6 @@ impl LRUKNode {
 pub struct LRUKReplacer {
     // k is the number of history references to track (the 'K' in LRU-K)
     k: usize,
-    // Maximum number of pages in buffer
-    buffer_size: usize,
     // Main page table: maps page IDs to their history blocks
     buffer: HashMap<FrameId, LRUKNode>,
     // size represents the number of evictable frames
@@ -133,10 +113,9 @@ pub struct LRUKReplacer {
 
 
 impl LRUKReplacer {
-    pub(crate) fn new(k: usize, buffer_size: usize) -> Self {
+    pub fn new(k: usize, _buffer_size: usize) -> Self {
         LRUKReplacer {
             k,
-            buffer_size,
             buffer: HashMap::new(),
             size: 0,
             current_timestamp_: Timestamp::MIN,
@@ -212,8 +191,8 @@ impl LRUKReplacer {
         })
     }
 
-    pub fn set_evictable(&mut self, page_id: FrameId, evictable: bool) {
-        if let Some(frame) = self.buffer.get_mut(&page_id) {
+    pub fn set_evictable(&mut self, frame_id: FrameId, evictable: bool) {
+        if let Some(frame) = self.buffer.get_mut(&frame_id) {
             if frame.is_evictable() && !evictable {
                 frame.evictable = evictable;
                 self.size -= 1;
@@ -229,10 +208,6 @@ impl LRUKReplacer {
     }
 }
 
-fn seconds_to_nanos(seconds: u64) -> Option<u128> {
-    let duration = Duration::from_secs(seconds);
-    Some(duration.as_nanos())
-}
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ pub enum BufferManagerError {
     Unexpected,
     PageNotFound,
     PagePinned,
+    FetchPage(String),
 }
 
 pub type BufferManagerResult<T> = std::result::Result<T, BufferManagerError>;
@@ -42,4 +43,5 @@ impl From<RecvTimeoutError> for BufferManagerError {
 }
 
 pub type FrameId = usize;
-pub type PageId = usize;
+#[derive(Debug, Hash, Eq, PartialEq, Copy, Clone)]
+pub struct PageId(pub usize);
