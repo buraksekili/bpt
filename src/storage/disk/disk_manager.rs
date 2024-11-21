@@ -78,6 +78,13 @@ impl DiskManager {
         let mut buffer = BytesMut::zeroed(PAGE_SIZE);
 
         let offset = (page_id.0 * PAGE_SIZE) as u64;
+        if offset > file.metadata().map_or(0, |m| m.len()) {
+            return Err(
+                StorageError::ManagerReadPage(
+                    format!("offset for {} exceeds current db, page may not exist", page_id.0)
+                )
+            );
+        }
 
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;
@@ -94,6 +101,18 @@ mod tests {
     use bytes::{BufMut, BytesMut};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_reading_nonexistent_page() -> StorageResult<()> {
+        let temp_dir = TempDir::new().expect("unable to create temp working directory");
+        let dm = DiskManager::new(temp_dir.path())?;
+
+        let r = dm.read_page(PageId(1));
+        assert!(r.is_err());
+        assert!(matches!(r, Err(StorageError::ManagerReadPage(_))));
+
+        Ok(())
+    }
 
     #[test]
     fn test_page_content_creation() -> StorageResult<()> {
