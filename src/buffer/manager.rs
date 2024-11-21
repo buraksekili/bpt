@@ -115,18 +115,10 @@ impl BufferManager {
     // Return nullptr if page_id needs to be fetched from the disk but all frames are currently
     // in use and not evictable (in another word, pinned).
     pub fn fetch_page(&self, page_id: PageId) -> BufferManagerResult<FrameHeader> {
-        // if self.free_list.len() == 0 && self.replacer.read().size() == 0 {
-        //     return Err(BufferManagerError::FetchPage(
-        //         "no page available".to_string(),
-        //     ));
-        // }
-
-        // First search for page_id in the buffer pool.
-        // If not found, pick a replacement frame from either the free list or
-        // the replacer (always find from the free list first),
-        // read the page from disk by calling disk_manager_->ReadPage(),
-        // and replace the old page in the frame.
-        // If the old page is dirty, you need to write it back to disk and update
+        // First search for page_id in the buffer pool. If not found, pick a replacement frame
+        // from either the free list or the replacer (always find from the free list first),
+        // read the page from disk by calling disk_manager_->ReadPage(), and replace the old page
+        // in the frame. If the old page is dirty, you need to write it back to disk and update
         // the metadata of the new page.
         if let Some(frame_id) = self.page_table.get(&page_id) {
             let existing_frame = self.pages[*frame_id.value()].clone();
@@ -150,10 +142,11 @@ impl BufferManager {
         let data: Bytes;
 
         {
-            let rch = self.disk_scheduler.schedule(DiskRequest::Read {
-                page_id
-            })?;
-            let response = rch.recv_timeout(Duration::from_secs(2))?;
+            let rx = self
+                .disk_scheduler
+                .schedule(DiskRequest::Read { page_id })?;
+            let response = rx.recv_timeout(Duration::from_secs(2))?;
+
             let result = match response {
                 DiskResponse::Read { data } => {
                     Ok(data)
@@ -215,19 +208,35 @@ impl BufferManager {
     }
 
     pub fn new_page(&self) -> BufferManagerResult<FrameHeader> {
-        let frame_id = self.allocate_frame()?;
+        let free_list_len = self.free_list.read().len();
+        let replacer_size = self.replacer.read().size();
+        if free_list_len == 0 && replacer_size == 0 {
+            return Err(BufferManagerError::FetchPage(
+                "no page available".to_string(),
+            ));
+        }
 
+        let frame_id = self.allocate_frame()?;
         let page_id =
-            self.handle_disk_response(DiskRequest::Allocate, Duration::from_secs(1), |response| {
-                match response {
-                    DiskResponse::Allocate { page_id } => Ok(page_id),
-                    DiskResponse::Error(err) => Err(err.into()),
-                    _ => Err(BufferManagerError::Unexpected),
-                }
-            })?;
+            self.handle_disk_response(
+                DiskRequest::Allocate,
+                Duration::from_secs(1),
+                |response| {
+                    match response {
+                        DiskResponse::Allocate { page_id } => Ok(page_id),
+                        DiskResponse::Error(err) => Err(err.into()),
+                        _ => Err(BufferManagerError::Unexpected),
+                    }
+                },
+            )?;
 
         {
             let mut frame = self.pages[frame_id].write();
+            if frame.is_dirty {
+                let rx = self.disk_scheduler.schedule(DiskRequest::Write { page_id: frame.page_id, data: frame.data.clone() })?;
+                rx.recv_timeout(Duration::from_secs(2))?;
+            }
+
             *frame = Frame::new(frame_id).with_page_id(page_id);
         }
 
@@ -290,7 +299,7 @@ impl BufferManager {
         Ok(self.pages[frame_id].read().pin_count)
     }
 
-    pub fn flush_page(&mut self, page_id: PageId) -> BufferManagerResult<()> {
+    pub fn flush_page(&self, page_id: PageId) -> BufferManagerResult<()> {
         let frame_id = *self
             .page_table
             .get(&page_id)
