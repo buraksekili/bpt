@@ -1,4 +1,4 @@
-# buffer-pool-rs
+# buffer-manager-rs
 
 [BusTub](https://github.com/cmu-db/bustub) buffer pool manager written in Rust.
 
