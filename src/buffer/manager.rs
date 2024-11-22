@@ -426,10 +426,32 @@ mod tests {
     }
 
     #[test]
+    fn test_disk_manager_full() -> BufferManagerResult<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+
+        const BUFFER_SIZE: usize = 3;
+        let ds = DiskScheduler::new(Arc::new(DiskManager::new(temp_dir.path()).unwrap()));
+        let replacer = LRUKReplacer::new(2, BUFFER_SIZE);
+        let m = BufferManager::new(BUFFER_SIZE, ds, replacer);
+
+        let page1 = m.new_page();
+        assert!(page1.is_ok());
+        let page2 = m.new_page();
+        assert!(page2.is_ok());
+        let page3 = m.new_page();
+        assert!(page3.is_ok());
+        let page4 = m.new_page();
+        assert!(page4.is_err());
+        assert!(matches!(page4, Err(BufferManagerError::FetchPage(_))));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_disk_manager_simple() -> BufferManagerResult<()> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
 
-        const BUFFER_SIZE: usize = 10;
+        const BUFFER_SIZE: usize = 3;
         let ds = DiskScheduler::new(Arc::new(DiskManager::new(temp_dir.path()).unwrap()));
         let replacer = LRUKReplacer::new(2, BUFFER_SIZE);
         let m = BufferManager::new(BUFFER_SIZE, ds, replacer);
@@ -455,6 +477,7 @@ mod tests {
             }
         }
 
+        assert!(m.free_list.read().is_empty());
         for i in 0..BUFFER_SIZE {
             let pin_count = m.get_pin_count(PageId(i))?;
             assert_eq!(pin_count, 0);
