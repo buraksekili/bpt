@@ -1,7 +1,7 @@
 use crate::buffer::types::PageId;
 use crate::storage::disk::disk_manager::DiskManager;
 use crate::storage::types::{StorageError, StorageResult};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -14,24 +14,15 @@ pub enum DiskError {
 }
 
 pub enum DiskResponse {
-    Read {
-        data: Bytes,
-    },
+    Read { data: BytesMut },
     Write,
-    Allocate {
-        page_id: PageId,
-    },
+    Allocate { page_id: PageId },
     Error(StorageError),
 }
 
 pub enum DiskRequest {
-    Write {
-        page_id: PageId,
-        data: Bytes,
-    },
-    Read {
-        page_id: PageId,
-    },
+    Write { page_id: PageId, data: Bytes },
+    Read { page_id: PageId },
     Allocate,
     Deallocate(PageId),
     Shutdown,
@@ -58,7 +49,6 @@ impl DiskScheduler {
             })
             .expect("failed to spawn background thread for disk scheduler");
 
-
         DiskScheduler {
             tx_request_queue,
             background_thread: Some(background_thread),
@@ -70,15 +60,10 @@ impl DiskScheduler {
         let (promise, future) = Self::create_promise();
 
         match self.tx_request_queue.send((r, promise)) {
-            Ok(_) => {
-                Ok(future)
-            }
-            Err(e) => {
-                Err(StorageError::Schedule(e.to_string()))
-            }
+            Ok(_) => Ok(future),
+            Err(e) => Err(StorageError::Schedule(e.to_string())),
         }
     }
-
 
     fn create_promise() -> (Sender<DiskResponse>, Receiver<DiskResponse>) {
         mpsc::channel()
@@ -99,26 +84,22 @@ impl DiskScheduler {
 
                             callback.send(DiskResponse::Write).unwrap();
                         }
-                        DiskRequest::Read { page_id } => {
-                            match disk_manager.read_page(page_id) {
-                                Ok(data) => {
-                                    callback.send(DiskResponse::Read { data }).unwrap();
-                                }
-                                Err(err) => {
-                                    callback.send(DiskResponse::Error(err)).unwrap();
-                                }
+                        DiskRequest::Read { page_id } => match disk_manager.read_page(page_id) {
+                            Ok(data) => {
+                                callback.send(DiskResponse::Read { data }).unwrap();
                             }
-                        }
-                        DiskRequest::Allocate => {
-                            match disk_manager.allocate_new_page() {
-                                Ok(page_id) => {
-                                    callback.send(DiskResponse::Allocate { page_id }).unwrap();
-                                }
-                                Err(e) => {
-                                    callback.send(DiskResponse::Error(e)).unwrap();
-                                }
+                            Err(err) => {
+                                callback.send(DiskResponse::Error(err)).unwrap();
                             }
-                        }
+                        },
+                        DiskRequest::Allocate => match disk_manager.allocate_new_page() {
+                            Ok(page_id) => {
+                                callback.send(DiskResponse::Allocate { page_id }).unwrap();
+                            }
+                            Err(e) => {
+                                callback.send(DiskResponse::Error(e)).unwrap();
+                            }
+                        },
                         DiskRequest::Deallocate(page_id) => {
                             match disk_manager.deallocate_page(page_id) {
                                 Err(err) => callback.send(DiskResponse::Error(err)).unwrap(),
@@ -147,7 +128,6 @@ impl Drop for DiskScheduler {
 
         let (tx, _) = Self::create_promise();
         let _ = self.tx_request_queue.send((DiskRequest::Shutdown, tx));
-
 
         if let Some(thread) = self.background_thread.take() {
             let remaining = timeout
@@ -195,19 +175,20 @@ mod tests {
 
         const TEST_CONTENT: &str = "test data";
         let write_data = create_dummy_page(TEST_CONTENT);
-        let rx = scheduler.schedule(
-            DiskRequest::Write {
-                page_id,
-                data: write_data.clone(),
-            },
-        )?;
+        let rx = scheduler.schedule(DiskRequest::Write {
+            page_id,
+            data: write_data.clone(),
+        })?;
         assert!(matches!(rx.recv().unwrap(), DiskResponse::Write));
 
         let rx = scheduler.schedule(DiskRequest::Read { page_id })?;
         match rx.recv().unwrap() {
             DiskResponse::Read { data } => {
                 assert_eq!(data.len(), PAGE_SIZE);
-                assert_eq!(read_page_content(&write_data), read_page_content(&data));
+                assert_eq!(
+                    read_page_content(&write_data),
+                    read_page_content(&data.clone().freeze())
+                );
                 assert_eq!(&data[..data.len()], &write_data[..data.len()]);
                 assert!(data[TEST_CONTENT.len()..].iter().all(|&x| x == 0));
             }
@@ -245,7 +226,9 @@ mod tests {
         for _ in 0..5 {
             let scheduler_clone = scheduler.clone();
             let handle = thread::spawn(move || {
-                let rx = scheduler_clone.schedule(DiskRequest::Read { page_id }).unwrap();
+                let rx = scheduler_clone
+                    .schedule(DiskRequest::Read { page_id })
+                    .unwrap();
                 rx.recv().unwrap()
             });
             handles.push(handle);
@@ -407,7 +390,9 @@ mod tests {
             _ => panic!("unexpected response"),
         };
 
-        let rx = disk_scheduler.schedule(DiskRequest::Read { page_id }).unwrap();
+        let rx = disk_scheduler
+            .schedule(DiskRequest::Read { page_id })
+            .unwrap();
         let result = rx.recv().unwrap();
         match result {
             DiskResponse::Read { data } => {
@@ -418,11 +403,12 @@ mod tests {
 
         const PAGE_CONTENT: &str = "hello world";
 
-        let rx = disk_scheduler.schedule(
-            DiskRequest::Write {
+        let rx = disk_scheduler
+            .schedule(DiskRequest::Write {
                 page_id,
                 data: create_dummy_page(PAGE_CONTENT),
-            }).unwrap();
+            })
+            .unwrap();
         let result = rx.recv().unwrap();
         match result {
             DiskResponse::Write => {}
@@ -430,16 +416,14 @@ mod tests {
             _ => panic!("unexpected response"),
         };
 
-
-        let rx = disk_scheduler.schedule(
-            DiskRequest::Read {
-                page_id,
-            }).unwrap();
+        let rx = disk_scheduler
+            .schedule(DiskRequest::Read { page_id })
+            .unwrap();
         let result = rx.recv().unwrap();
         match result {
             DiskResponse::Read { data } => {
                 assert_eq!(PAGE_SIZE, data.len());
-                assert_eq!(read_page_content(&data), PAGE_CONTENT);
+                assert_eq!(read_page_content(&data.freeze()), PAGE_CONTENT);
             }
             DiskResponse::Error(err) => panic!("unexpected error: {}", err),
             _ => panic!("unexpected response"),

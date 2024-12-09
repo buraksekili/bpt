@@ -1,15 +1,16 @@
+use super::types::INVALID_PAGE_ID;
 use crate::buffer::lruk_replacer::LRUKReplacer;
 use crate::buffer::types::{BufferManagerError, BufferManagerResult, FrameId, PageId};
 use crate::storage::disk::disk_scheduler::{DiskRequest, DiskResponse, DiskScheduler};
 use crate::storage::disk::PAGE_SIZE;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub struct FrameHeader {
-    frame: Arc<RwLock<Frame>>,
+    pub frame: Arc<RwLock<Frame>>,
     replacer: Arc<RwLock<LRUKReplacer>>,
 }
 
@@ -30,20 +31,20 @@ impl Drop for FrameHeader {
 }
 
 // FrameHeader corresponds to the frame (page) in memory.
-struct Frame {
+pub struct Frame {
     frame_id: FrameId,
-    page_id: PageId,
+    pub page_id: PageId,
     pin_count: u32,
-    is_dirty: bool,
-    data: Bytes,
+    pub is_dirty: bool,
+    pub data: BytesMut,
 }
 
 impl Frame {
     fn new(frame_id: FrameId) -> Self {
         Self {
             frame_id,
-            page_id: PageId(0),
-            data: BytesMut::zeroed(PAGE_SIZE).freeze(),
+            page_id: INVALID_PAGE_ID,
+            data: BytesMut::zeroed(PAGE_SIZE),
             is_dirty: false,
             pin_count: 1,
         }
@@ -58,8 +59,8 @@ impl Frame {
         self.pin_count = 0;
         self.frame_id = 0;
         self.is_dirty = false;
-        self.data = BytesMut::zeroed(PAGE_SIZE).freeze();
-        self.page_id = PageId(0);
+        self.data = BytesMut::zeroed(PAGE_SIZE);
+        self.page_id = INVALID_PAGE_ID;
     }
 }
 
@@ -100,7 +101,6 @@ impl BufferManager {
             free_list.push(i);
         }
 
-
         BufferManager {
             pages,
             page_table: Arc::new(DashMap::new()),
@@ -109,7 +109,6 @@ impl BufferManager {
             disk_scheduler: Arc::new(disk_scheduler),
         }
     }
-
 
     // Fetch the requested page from the buffer pool.
     // Return nullptr if page_id needs to be fetched from the disk but all frames are currently
@@ -122,7 +121,10 @@ impl BufferManager {
         // the metadata of the new page.
         if let Some(frame_id) = self.page_table.get(&page_id) {
             let existing_frame = self.pages[*frame_id.value()].clone();
-            existing_frame.try_write_for(Duration::from_secs(2)).unwrap().pin_count += 1;
+            existing_frame
+                .try_write_for(Duration::from_secs(2))
+                .unwrap()
+                .pin_count += 1;
             {
                 let frame_id = *frame_id.value();
 
@@ -139,7 +141,7 @@ impl BufferManager {
         }
 
         let frame_id = self.allocate_frame()?;
-        let data: Bytes;
+        let data: BytesMut;
 
         {
             let rx = self
@@ -148,13 +150,11 @@ impl BufferManager {
             let response = rx.recv_timeout(Duration::from_secs(2))?;
 
             let result = match response {
-                DiskResponse::Read { data } => {
-                    Ok(data)
-                }
+                DiskResponse::Read { data } => Ok(data),
                 DiskResponse::Error(err) => Err(BufferManagerError::StorageError(err)),
-                _ => Err(
-                    BufferManagerError::FetchPage("Unexpected disk response from disk scheduler".to_string())
-                )
+                _ => Err(BufferManagerError::FetchPage(
+                    "Unexpected disk response from disk scheduler".to_string(),
+                )),
             }?;
 
             data = result;
@@ -218,22 +218,21 @@ impl BufferManager {
 
         let frame_id = self.allocate_frame()?;
         let page_id =
-            self.handle_disk_response(
-                DiskRequest::Allocate,
-                Duration::from_secs(1),
-                |response| {
-                    match response {
-                        DiskResponse::Allocate { page_id } => Ok(page_id),
-                        DiskResponse::Error(err) => Err(err.into()),
-                        _ => Err(BufferManagerError::Unexpected),
-                    }
-                },
-            )?;
+            self.handle_disk_response(DiskRequest::Allocate, Duration::from_secs(1), |response| {
+                match response {
+                    DiskResponse::Allocate { page_id } => Ok(page_id),
+                    DiskResponse::Error(err) => Err(err.into()),
+                    _ => Err(BufferManagerError::Unexpected),
+                }
+            })?;
 
         {
             let mut frame = self.pages[frame_id].write();
             if frame.is_dirty {
-                let rx = self.disk_scheduler.schedule(DiskRequest::Write { page_id: frame.page_id, data: frame.data.clone() })?;
+                let rx = self.disk_scheduler.schedule(DiskRequest::Write {
+                    page_id: frame.page_id,
+                    data: frame.data.clone().freeze(),
+                })?;
                 rx.recv_timeout(Duration::from_secs(2))?;
             }
 
@@ -282,12 +281,13 @@ impl BufferManager {
         self.free_list.write().push(frame_id);
 
         self.page_table.remove(&page_id);
-        let rx = self.disk_scheduler.schedule(DiskRequest::Deallocate(page_id));
+        let rx = self
+            .disk_scheduler
+            .schedule(DiskRequest::Deallocate(page_id));
         rx?.recv_timeout(Duration::from_secs(1))?;
 
         Ok(DeletePageResponse::Deleted)
     }
-
 
     pub fn get_pin_count(&self, page_id: PageId) -> BufferManagerResult<u32> {
         let frame_id = self.page_table.get(&page_id);
@@ -309,7 +309,7 @@ impl BufferManager {
             let mut frame = self.pages[frame_id].write();
             self.disk_scheduler.schedule(DiskRequest::Write {
                 page_id,
-                data: frame.data.clone(),
+                data: frame.data.clone().freeze(),
             })?;
             frame.pin_count -= 1;
             frame.is_dirty = false;
@@ -350,6 +350,25 @@ impl BufferManager {
         }
 
         false
+    }
+
+    /// Write data to a specific page. This method will:
+    /// 1. Fetch the page (or create if doesn't exist)
+    /// 2. Write the data
+    /// 3. Mark as dirty
+    /// 4. Unpin the page
+    pub fn write_page(&self, page_id: PageId, data: &[u8]) -> BufferManagerResult<()> {
+        // Get the page
+        let frame_header = self.fetch_page(page_id)?;
+
+        {
+            let mut frame = frame_header.frame.write();
+            frame.data.clear();
+            frame.data.extend_from_slice(data);
+            frame.is_dirty = true;
+        }
+
+        Ok(())
     }
 
     fn handle_disk_response<T, F>(
@@ -414,7 +433,10 @@ mod tests {
         assert_eq!(current_pin_count, 0);
 
         assert!(m.delete_page(page_id).is_ok());
-        assert!(matches!(m.delete_page(page_id), Ok(DeletePageResponse::NotFound)));
+        assert!(matches!(
+            m.delete_page(page_id),
+            Ok(DeletePageResponse::NotFound)
+        ));
     }
 
     #[test]

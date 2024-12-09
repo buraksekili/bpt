@@ -1,7 +1,7 @@
 use crate::buffer::types::PageId;
 use crate::storage::disk::PAGE_SIZE;
 use crate::storage::types::{StorageError, StorageResult};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -73,24 +73,24 @@ impl DiskManager {
         Ok(())
     }
 
-    pub fn read_page(&self, page_id: PageId) -> StorageResult<Bytes> {
+    pub fn read_page(&self, page_id: PageId) -> StorageResult<BytesMut> {
         let mut file = self.db_file.lock();
         let mut buffer = BytesMut::zeroed(PAGE_SIZE);
 
         let offset = (page_id.0 * PAGE_SIZE) as u64;
         if offset > file.metadata().map_or(0, |m| m.len()) {
             return Err(
-                StorageError::ManagerReadPage(
-                    format!("offset for {} exceeds current db, page may not exist", page_id.0)
-                )
-            );
+                StorageError::ManagerReadPage(format!(
+                    "offset for {} exceeds current db, page may not exist",
+                    page_id.0
+                )));
         }
 
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;
 
         // Convert BytesMut to Bytes
-        Ok(buffer.freeze())
+        Ok(buffer)
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
         dm.write_page(page_id, &page_data)?;
 
         let read_page = dm.read_page(page_id)?;
-        let read_content = read_page_content(&read_page);
+        let read_content = read_page_content(&read_page.freeze());
         assert_eq!(read_content, test_content);
 
         Ok(())
@@ -147,7 +147,7 @@ mod tests {
         dm.write_page(page_id, &updated_page)?;
 
         let read_page = dm.read_page(page_id)?;
-        let read_content = read_page_content(&read_page);
+        let read_content = read_page_content(&read_page.freeze());
         assert_eq!(read_content, updated_content);
 
         Ok(())
@@ -170,7 +170,7 @@ mod tests {
 
         for (page_id, expected_content) in page_ids.iter().zip(contents.iter()) {
             let read_page = dm.read_page(*page_id)?;
-            let read_content = read_page_content(&read_page);
+            let read_content = read_page_content(&read_page.freeze());
             assert_eq!(&read_content, *expected_content);
         }
 
@@ -218,7 +218,7 @@ mod tests {
         }
 
         let final_page = dm.read_page(page_id)?;
-        let final_content = read_page_content(&final_page);
+        let final_content = read_page_content(&final_page.freeze());
         assert!(final_content.starts_with("Update "));
 
         Ok(())

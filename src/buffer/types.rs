@@ -45,3 +45,4 @@ impl From<RecvTimeoutError> for BufferManagerError {
 pub type FrameId = usize;
 #[derive(Debug, Hash, Eq, PartialEq, Copy, Clone)]
 pub struct PageId(pub usize);
+pub const INVALID_PAGE_ID: PageId = PageId(0);
