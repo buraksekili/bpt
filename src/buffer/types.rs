@@ -1,5 +1,6 @@
 use crate::storage::types::StorageError;
 use std::fs::File;
+use std::ops::Deref;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{MutexGuard, PoisonError};
 
@@ -45,4 +46,11 @@ impl From<RecvTimeoutError> for BufferManagerError {
 pub type FrameId = usize;
 #[derive(Debug, Hash, Eq, PartialEq, Copy, Clone)]
 pub struct PageId(pub usize);
+impl Deref for PageId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 pub const INVALID_PAGE_ID: PageId = PageId(0);
