@@ -3,12 +3,12 @@ use crate::buffer::lruk_replacer::LRUKReplacer;
 use crate::buffer::types::{BufferManagerError, BufferManagerResult, FrameId, PageId};
 use crate::storage::disk::disk_scheduler::{DiskRequest, DiskResponse, DiskScheduler};
 use crate::storage::disk::PAGE_SIZE;
+use crate::storage::types::StorageError;
 use bytes::BytesMut;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::storage::types::StorageError;
 
 pub struct FrameHeader {
     pub frame: Arc<RwLock<Frame>>,
@@ -157,7 +157,7 @@ impl BufferManager {
                     if not_exists {
                         return Err(BufferManagerError::PageNotFound);
                     }
-                    
+
                     Err(BufferManagerError::StorageError(err))
                 }
                 _ => Err(BufferManagerError::FetchPage(
@@ -505,25 +505,26 @@ mod tests {
 
         {
             for i in 0..BUFFER_SIZE {
+                let pid = PageId(i + 1);
                 let frame_header = m.new_page()?;
                 let page_id = frame_header.frame.read().page_id;
                 let frame_id = frame_header.frame.read().frame_id;
-                assert_eq!(page_id, PageId(i));
+                assert_eq!(page_id, pid);
                 assert_eq!(frame_id, *m.page_table.get(&page_id).unwrap().value());
                 assert_eq!(frame_id, BUFFER_SIZE - (i + 1));
 
-                let pin_count = m.get_pin_count(PageId(i))?;
+                let pin_count = m.get_pin_count(pid)?;
                 assert_eq!(pin_count, 1);
                 assert_eq!(m.free_list.read().len(), BUFFER_SIZE - (i + 1));
 
-                let result = m.delete_page(PageId(i));
+                let result = m.delete_page(pid);
                 assert!(matches!(result, Err(BufferManagerError::PagePinned)));
             }
         }
 
         assert!(m.free_list.read().is_empty());
         for i in 0..BUFFER_SIZE {
-            let pin_count = m.get_pin_count(PageId(i))?;
+            let pin_count = m.get_pin_count(PageId(i + 1))?;
             assert_eq!(pin_count, 0);
         }
 

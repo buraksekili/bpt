@@ -46,7 +46,7 @@ impl DiskManager {
     pub fn allocate_new_page(&self) -> StorageResult<PageId> {
         let mut file = self.db_file.lock();
 
-        let new_page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst);
+        let new_page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst) + 1;
         let offset = (new_page_id as u64) * (PAGE_SIZE as u64);
 
         file.seek(SeekFrom::Start(offset))?;
