@@ -8,6 +8,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
+use crate::storage::types::StorageError;
 
 pub struct FrameHeader {
     pub frame: Arc<RwLock<Frame>>,
@@ -151,7 +152,14 @@ impl BufferManager {
 
             let result = match response {
                 DiskResponse::Read { data } => Ok(data),
-                DiskResponse::Error(err) => Err(BufferManagerError::StorageError(err)),
+                DiskResponse::Error(err) => {
+                    let not_exists = matches!(err, StorageError::ManagerReadPage(_));
+                    if not_exists {
+                        return Err(BufferManagerError::PageNotFound);
+                    }
+                    
+                    Err(BufferManagerError::StorageError(err))
+                }
                 _ => Err(BufferManagerError::FetchPage(
                     "Unexpected disk response from disk scheduler".to_string(),
                 )),
@@ -411,6 +419,20 @@ mod tests {
         assert_eq!(frame_header.frame.read().page_id, PageId(0));
         drop(frame_header);
         assert_eq!(Arc::strong_count(&frame), 1);
+    }
+
+    #[test]
+    fn test_fetch_nonexistent() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+
+        const BUFFER_SIZE: usize = 10;
+        let ds = DiskScheduler::new(Arc::new(DiskManager::new(temp_dir.path()).unwrap()));
+        let replacer = LRUKReplacer::new(2, BUFFER_SIZE);
+        let m = BufferManager::new(BUFFER_SIZE, ds, replacer);
+
+        let result = m.fetch_page(PageId(123));
+        assert!(result.is_err());
+        assert!(matches!(result, Err(BufferManagerError::PageNotFound)));
     }
 
     #[test]
