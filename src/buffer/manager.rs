@@ -237,11 +237,7 @@ impl BufferManager {
         {
             let mut frame = self.pages[frame_id].write();
             if frame.is_dirty {
-                let rx = self.disk_scheduler.schedule(DiskRequest::Write {
-                    page_id: frame.page_id,
-                    data: frame.data.clone().freeze(),
-                })?;
-                rx.recv_timeout(Duration::from_secs(2))?;
+                self.flush_page(frame.page_id)?;
             }
 
             *frame = Frame::new(frame_id).with_page_id(page_id);
@@ -314,19 +310,19 @@ impl BufferManager {
             .ok_or(BufferManagerError::PageNotFound)?;
 
         {
-            let mut frame = self.pages[frame_id].write();
-            self.disk_scheduler.schedule(DiskRequest::Write {
+            let frame = self.pages[frame_id].write();
+            let rx = self.disk_scheduler.schedule(DiskRequest::Write {
                 page_id,
                 data: frame.data.clone().freeze(),
             })?;
-            frame.pin_count -= 1;
-            frame.is_dirty = false;
+            rx.recv_timeout(Duration::from_secs(3))?;
+            println!(".");
         }
 
         Ok(())
     }
 
-    pub fn flush_all(&mut self) -> BufferManagerResult<()> {
+    pub fn flush_all(&self) -> BufferManagerResult<()> {
         let pages: Vec<PageId> = self.page_table.iter().map(|kv| *kv.key()).collect();
 
         for page_id in pages {
@@ -364,7 +360,6 @@ impl BufferManager {
     /// 1. Fetch the page (or create if doesn't exist)
     /// 2. Write the data
     /// 3. Mark as dirty
-    /// 4. Unpin the page
     pub fn write_page(&self, page_id: PageId, data: &[u8]) -> BufferManagerResult<()> {
         // Get the page
         let frame_header = self.fetch_page(page_id)?;
