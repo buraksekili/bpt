@@ -310,13 +310,13 @@ impl BufferManager {
             .ok_or(BufferManagerError::PageNotFound)?;
 
         {
-            let frame = self.pages[frame_id].write();
+            let mut frame = self.pages[frame_id].write();
             let rx = self.disk_scheduler.schedule(DiskRequest::Write {
                 page_id,
                 data: frame.data.clone().freeze(),
             })?;
             rx.recv_timeout(Duration::from_secs(3))?;
-            println!(".");
+            frame.is_dirty = false;
         }
 
         Ok(())
@@ -360,14 +360,15 @@ impl BufferManager {
     /// 1. Fetch the page (or create if doesn't exist)
     /// 2. Write the data
     /// 3. Mark as dirty
-    pub fn write_page(&self, page_id: PageId, data: &[u8]) -> BufferManagerResult<()> {
+    pub fn write_page(&self, page_id: PageId, new_data: &BytesMut) -> BufferManagerResult<()> {
         // Get the page
         let frame_header = self.fetch_page(page_id)?;
 
         {
             let mut frame = frame_header.frame.write();
             frame.data.clear();
-            frame.data.extend_from_slice(data);
+            frame.data.extend_from_slice(new_data);
+            frame.data.resize(PAGE_SIZE, 0);
             frame.is_dirty = true;
         }
 
