@@ -20,7 +20,7 @@ use crate::{
     },
     storage::disk::PAGE_SIZE,
 };
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -147,16 +147,17 @@ impl BPlusTree {
 
         while curr_tree_page.is_full() {
             match curr_tree_page {
-                BPlusTreePage::Internal(ref mut ip) => {
-                    let (new_node, new_node_pid) = self.split_internal_page(ip)?;
+                BPlusTreePage::Internal(ref mut curr_full_internal_page) => {
+                    let (new_node, new_node_pid) = self.split_internal_page(curr_full_internal_page)?;
+                    let curr_page_id = curr_page_frame.frame.read().page_id;
+                    self.bpm.write_page(curr_page_id, &curr_full_internal_page.serialize())?;
                     let min_leaf = self.min_leaf(new_node_pid)?;
 
-                    let curr_page_id = curr_page_frame.frame.read().page_id;
                     if let Some(parent_node_pid) = ctx.pop_back() {
                         let (parent_node_frame, mut parent_tree_page) =
                             self.fetch_page(parent_node_pid)?;
                         parent_tree_page
-                            .insert_internal(*new_node.keys.get(0).unwrap(), new_node_pid);
+                            .insert_internal(*new_node.keys.first().unwrap(), new_node_pid);
                         curr_tree_page = parent_tree_page;
                         curr_page_frame = parent_node_frame;
                     } else if curr_page_id == self.get_root_page_id() {
@@ -165,11 +166,9 @@ impl BPlusTree {
                         let mut new_root_internal_tree_page =
                             BPlusTreeInternalPage::new(self.internal_max_size);
 
-                        if key == 3 {
-                            println!(".");
-                        }
-                        new_root_internal_tree_page.insert(key, self.get_root_page_id());
-                        new_root_internal_tree_page.insert(min_leaf.0, min_leaf.1.page_id);
+                        new_root_internal_tree_page.page_ids.push(curr_page_id);
+                        new_root_internal_tree_page
+                            .insert(min_leaf.0, new_node_pid);
                         self.bpm.write_page(
                             new_root_page_id,
                             &new_root_internal_tree_page.serialize(),
@@ -336,7 +335,7 @@ impl BPlusTree {
     // We return these as a pair because the parent node needs both pieces:
     // - The key to make routing decisions
     // - The page ID to actually follow that route
-    pub fn min_leaf(&self, page_id: PageId) -> BPlusTreeResult<(IndexPageKey, RID)> {
+    pub fn min_leaf(&self, page_id: PageId) -> BPlusTreeResult<(IndexPageKey, PageId)> {
         let (mut frame_header, mut curr_tree_page) = self.fetch_page(page_id)?;
         loop {
             match curr_tree_page {
@@ -347,8 +346,9 @@ impl BPlusTree {
                     frame_header = next_page_frame_header;
                 }
                 BPlusTreePage::Leaf(leaf_page) => {
-                    // Both frame_header.page_id and given page_id arguments are same??
-                    return Ok((leaf_page.keys[0], leaf_page.values[0]));
+                    // return Ok((leaf_page.keys[0], leaf_page.values[0]));
+                    let pid = frame_header.frame.read().page_id;
+                    return Ok((leaf_page.keys[0], pid));
                 }
             }
         }
@@ -503,21 +503,22 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_insert() {
+    fn test_simple_insert() -> BPlusTreeResult<()> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let bpm = Arc::new(create_bpm(10, &temp_dir));
 
         let bpt = BPlusTree::new(INVALID_PAGE_ID, bpm.clone());
         assert_eq!(bpt.get_root_page_id(), INVALID_PAGE_ID);
 
-        bpt.insert(1, RID::new(PageId(11), 11)).unwrap();
-        bpt.insert(2, RID::new(PageId(12), 12)).unwrap();
-        bpt.insert(3, RID::new(PageId(13), 13)).unwrap();
-        bpt.insert(4, RID::new(PageId(14), 14)).unwrap();
-        bpt.insert(5, RID::new(PageId(15), 15)).unwrap();
-        bpt.insert(6, RID::new(PageId(16), 16)).unwrap();
-        bpt.insert(7, RID::new(PageId(17), 17)).unwrap();
+        for i in 1..=11 {
+            println!("i -> {}", i);
+            let frame = bpm.new_page()?;
+            let pid = frame.frame.read().page_id;
+            bpt.insert(i, RID::new(pid, i))?;
+        }
+
         println!("\n***** FINAL ***********");
-        bpt.print_tree().unwrap();
+        bpt.print_tree()?;
+        Ok(())
     }
 }

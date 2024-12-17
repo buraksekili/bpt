@@ -208,14 +208,22 @@ pub struct BPlusTreeInternalPage {
 }
 
 impl BPlusTreeInternalPage {
-    pub(crate) fn copy_half_from(&mut self, tree_page: &mut BPlusTreeInternalPage) {
-        let idx = tree_page.header.base.size / 2;
-        let keys = tree_page.keys.split_off(idx);
-        let pids = tree_page.page_ids.split_off(idx);
+    pub(crate) fn copy_half_from(&mut self, full_internal_tree: &mut BPlusTreeInternalPage) {
+        let idx = full_internal_tree.header.base.size / 2;
+        
+        let first_invalid_key = full_internal_tree.keys.remove(0);
+        let first_invalid_key_ptr = *full_internal_tree.page_ids.get(idx).unwrap();
 
-        self.header.base.size -= keys.len();
+        let keys = full_internal_tree.keys.split_off(idx);
+        let pids = full_internal_tree.page_ids.split_off(idx);
+        full_internal_tree.keys.insert(0, first_invalid_key);
+        full_internal_tree.page_ids.push(first_invalid_key_ptr);
+
+        full_internal_tree.header.base.size -= keys.len();
+        self.header.base.size = keys.len();
         self.keys = keys;
         self.page_ids = pids;
+        self.keys.insert(0, first_invalid_key);
     }
 
     /// Sorts the keys and page_ids while maintaining their relationships.
