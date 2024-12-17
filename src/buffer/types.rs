@@ -1,3 +1,6 @@
+use bytes::BytesMut;
+
+use crate::storage::common::BoundedReader;
 use crate::storage::types::StorageError;
 use std::fs::File;
 use std::ops::Deref;
@@ -46,6 +49,13 @@ impl From<RecvTimeoutError> for BufferManagerError {
 pub type FrameId = usize;
 #[derive(Debug, Hash, Eq, PartialEq, Copy, Clone)]
 pub struct PageId(pub usize);
+
+impl PageId {
+    pub fn serialize_into(&self, buf: &mut BytesMut) {
+        buf.write_u32(self.0 as u32);
+    }
+}
+
 impl Deref for PageId {
     type Target = usize;
 

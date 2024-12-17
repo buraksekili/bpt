@@ -226,7 +226,7 @@ impl BufferManager {
 
         let frame_id = self.allocate_frame()?;
         let page_id =
-            self.handle_disk_response(DiskRequest::Allocate, Duration::from_secs(1), |response| {
+            self.handle_disk_response(DiskRequest::Allocate, Duration::from_secs(300), |response| {
                 match response {
                     DiskResponse::Allocate { page_id } => Ok(page_id),
                     DiskResponse::Error(err) => Err(err.into()),
